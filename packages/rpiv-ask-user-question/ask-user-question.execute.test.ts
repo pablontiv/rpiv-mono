@@ -1,6 +1,7 @@
 import { createMockCtx, createMockPi, mockStdout } from "@juicesharp/rpiv-test-utils";
 import { describe, expect, it, vi } from "vitest";
 import { BEL, registerAskUserQuestionTool } from "./ask-user-question.js";
+import { createDefaultClient, TYPESAFE_PROVIDER_ID } from "./jev-auto-answer.js";
 import { MAX_QUESTIONS, type QuestionnaireResult } from "./tool/types.js";
 
 type CustomFn = (...args: unknown[]) => Promise<unknown>;
@@ -453,6 +454,56 @@ describe("ask_user_question.execute — Jev auto-answer", () => {
 
 		expect(r?.details).toMatchObject({ cancelled: true, error: "auto_answer_failed" });
 		expect(r?.content[0]).toMatchObject({ text: expect.stringContaining("user never saw") });
+	});
+
+	it("threads Pi's TypeSafe credential resolver into runAutoAnswer when auto-answer is enabled", async () => {
+		// Regression: previously the tool passed only (typed, config, signal), so
+		// createDefaultClient fell back to TYPESAFE_API_KEY even when the user
+		// had already run `Pi /login typesafe` and saved the key to auth.json.
+		const { pi, captured } = createMockPi();
+		const runAutoAnswer = vi.fn(async () => ({
+			ok: true as const,
+			result: {
+				cancelled: false,
+				answers: [{ questionIndex: 0, question: "Which?", kind: "option" as const, answer: "A" }],
+				autoAnswer: {
+					provider: "typesafe" as const,
+					model: "jev-1.13.0",
+					evaluations: [{ questionIndex: 0, confidence: 0.9, probabilities: { A: 0.9, B: 0.1 } }],
+					usage: { input_tokens: 1, output_tokens: 1 },
+				},
+			},
+		}));
+		registerAskUserQuestionTool(pi, { enabled: true }, runAutoAnswer);
+		const tool = captured.tools.get("ask_user_question")!;
+		const ctx = createMockCtx({ hasUI: true, ui: { custom: vi.fn() } as never });
+
+		await tool.execute?.(
+			"tc",
+			{ ...BASE_PARAMS, state: "bounded facts" } as never,
+			undefined as never,
+			undefined as never,
+			ctx as never,
+		);
+
+		expect(runAutoAnswer).toHaveBeenCalledOnce();
+		// `vi.fn()` infers an empty arg tuple; cast to `unknown[]` so the runtime
+		// arg indexing doesn't trip the TS2493 tuple-length check.
+		const args = runAutoAnswer.mock.calls[0] as unknown as unknown[];
+		// 4th arg: explicit `createDefaultClient` so the tool no longer relies on
+		// the default that resolves the env var alone.
+		expect(args[3]).toBe(createDefaultClient);
+		// 5th arg: resolver that reads from Pi's modelRegistry.
+		const resolver = args[4] as () => Promise<string | undefined>;
+		expect(typeof resolver).toBe("function");
+		await expect(resolver()).resolves.toBeUndefined();
+		// Confirm the resolver would actually round-trip through the mock registry
+		// (default mock returns undefined, but the call site uses the real method).
+		const spy = vi
+			.spyOn(ctx.modelRegistry, "getApiKeyForProvider")
+			.mockResolvedValueOnce("pi-registry-key-from-auth-json");
+		await expect(resolver()).resolves.toBe("pi-registry-key-from-auth-json");
+		expect(spy).toHaveBeenCalledWith(TYPESAFE_PROVIDER_ID);
 	});
 });
 

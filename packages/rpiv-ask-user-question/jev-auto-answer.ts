@@ -169,17 +169,58 @@ function mapJevResponse(
 	return { ok: true, result: { answers, cancelled: false, autoAnswer } };
 }
 
-async function createDefaultClient(config: ResolvedJevConfig): Promise<JevClient> {
-	const { TypeSafeClient } = await import("@typesafe-ai/sdk");
-	return new TypeSafeClient({ defaultModel: config.model });
+// Provider id for the TypeSafe credential stored by Pi /login.
+// The TypeSafe SDK has no built-in provider entry in the registry; we look the
+// credential up by name so `/login typesafe` (which writes to auth.json) is
+// honoured instead of forcing the user to set TYPESAFE_API_KEY in the env.
+const TYPESAFE_PROVIDER_ID = "typesafe";
+
+/**
+ * Resolve a TypeSafe API key, preferring whatever Pi's model registry hands us
+ * (the credential saved by `/login typesafe`) and only falling back to the
+ * TYPESAFE_API_KEY environment variable when the registry returns nothing
+ * (older installs, CI, or test setups without an auth.json entry). Errors
+ * thrown by the registry are swallowed: a missing Pi session must never block
+ * the user from opting into auto-answer via an exported env var.
+ */
+async function resolveTypesafeApiKey(
+	resolver: (() => Promise<string | undefined>) | undefined,
+): Promise<string | undefined> {
+	if (!resolver) return undefined;
+	try {
+		return await resolver();
+	} catch {
+		return undefined;
+	}
 }
+
+async function createDefaultClient(
+	config: ResolvedJevConfig,
+	apiKeyResolver?: () => Promise<string | undefined>,
+): Promise<JevClient> {
+	const { TypeSafeClient } = await import("@typesafe-ai/sdk");
+	// Forward the resolved key when present; pass `undefined` (not empty string)
+	// so the SDK's `fromCodeOrEnv` falls back to TYPESAFE_API_KEY when no
+	// Pi-resolved credential is available.
+	const apiKey = await resolveTypesafeApiKey(apiKeyResolver);
+	return new TypeSafeClient({ apiKey, defaultModel: config.model });
+}
+
+// Exported so unit tests can drive the credential-resolution path directly
+// (mocking the SDK without going through `autoAnswerWithJev`). Internal callers
+// use it as the default factory for `autoAnswerWithJev`.
+export { createDefaultClient };
 
 /** Run Jev only when explicit state exists; callers own UI/non-UI fallback policy. */
 export async function autoAnswerWithJev(
 	params: QuestionParams,
 	config: ResolvedJevConfig,
 	signal?: AbortSignal,
-	clientFactory: (config: ResolvedJevConfig) => Promise<JevClient> = createDefaultClient,
+	clientFactory: (
+		config: ResolvedJevConfig,
+		apiKeyResolver?: () => Promise<string | undefined>,
+	) => Promise<JevClient> = createDefaultClient,
+	apiKeyResolver?: () => Promise<string | undefined>,
 ): Promise<JevAutoAnswerOutcome> {
 	if (!params.state || params.state.trim().length === 0) {
 		return {
@@ -190,7 +231,7 @@ export async function autoAnswerWithJev(
 	}
 
 	try {
-		const client = await clientFactory(config);
+		const client = await clientFactory(config, apiKeyResolver);
 		const response = await client.systemOne(
 			{ state: params.state, model: config.model, questions: buildJevQuestions(params) },
 			{ signal },
@@ -202,3 +243,5 @@ export async function autoAnswerWithJev(
 		return { ok: false, error: "auto_answer_failed", message: `Jev auto-answer failed: ${cause}` };
 	}
 }
+
+export { TYPESAFE_PROVIDER_ID };

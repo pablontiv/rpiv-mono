@@ -194,6 +194,10 @@ export function createMockModelRegistry(models: Model<Api>[] = []) {
 		find: vi.fn((provider: string, id: string) => models.find((m) => m.provider === provider && m.id === id)),
 		getAvailable: vi.fn(() => [...models]),
 		getApiKeyAndHeaders: vi.fn(async () => ({ ok: true, apiKey: "test-key", headers: {} })),
+		// Mirrors `ModelRegistry.getApiKeyForProvider(provider)` (pi-coding-agent ≥0.79).
+		// Returns undefined by default so existing tests stay offline; tests that
+		// exercise the Jev typesafe resolver override this via `mockResolvedValueOnce`.
+		getApiKeyForProvider: vi.fn(async () => undefined),
 	};
 }
 

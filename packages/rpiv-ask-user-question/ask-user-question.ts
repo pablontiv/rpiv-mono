@@ -16,7 +16,7 @@ import {
 	type AskUserBlockedEventPayload,
 	type AskUserPromptEventPayload,
 } from "./events.js";
-import { autoAnswerWithJev } from "./jev-auto-answer.js";
+import { autoAnswerWithJev, createDefaultClient, TYPESAFE_PROVIDER_ID } from "./jev-auto-answer.js";
 // Static import is fine — rpc-fallback pulls only types + the i18n bridge,
 // none of the ~560ms TUI render graph that QuestionnaireSession lazy-loads.
 import { type DialogUI, hasDialogUI, runRpcQuestionnaire } from "./rpc-fallback.js";
@@ -348,7 +348,22 @@ export function registerAskUserQuestionTool(
 			}
 
 			if (autoAnswerState.enabled) {
-				const outcome = await runAutoAnswer(typed, resolveJevConfig(loadConfig()), signal);
+				// Resolve the TypeSafe credential via Pi's model registry so that
+				// `/login typesafe` (which writes to ~/.pi/agent/auth.json) is
+				// honoured. `createDefaultClient` falls back to TYPESAFE_API_KEY
+				// when the registry returns nothing, preserving the existing
+				// env-var escape hatch. The registry call is wrapped because a
+				// missing Pi session (older RPC builds, headless test hosts)
+				// must never block the user from opting into auto-answer.
+				const apiKeyResolver = () =>
+					(ctx as ExtensionContext).modelRegistry.getApiKeyForProvider(TYPESAFE_PROVIDER_ID);
+				const outcome = await runAutoAnswer(
+					typed,
+					resolveJevConfig(loadConfig()),
+					signal,
+					createDefaultClient,
+					apiKeyResolver,
+				);
 				if (outcome.ok) return buildAutoAnswerResponse(outcome.result, typed);
 				if (!ctx.hasUI) return rejectAutoAnswerWithoutUi(outcome.error, outcome.message);
 				ctx.ui.notify(`${outcome.message} Showing the questionnaire instead.`, "warning");
